@@ -12,8 +12,6 @@ A simple bookkeeping web application to manage products, sales, purchases, and p
 - [Usage](#usage)
 - [Project Structure](#project-structure)
 - [Contributing](#contributing)
-- [License](#license)
-
 ---
 
 ## Overview
