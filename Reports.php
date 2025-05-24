@@ -8,13 +8,13 @@ $total_revenue = 0;
 $total_expenses = 0;
 $profit = 0;
 
-if (isset($_GET['delete_month'])) {
-    $month_to_delete = $_GET['delete_month'];
+if (isset($_GET['delete_id'])) {
+    $id = $_GET['delete_id'];
 
-    $stmt = $pdo->prepare("DELETE FROM reports WHERE month = ?");
-    $stmt->execute([$month_to_delete]);
+    $stmt = $pdo->prepare("DELETE FROM reports WHERE id = ?");
+    $stmt->execute([$id]);
 
-    echo "<p class='message'>Report for {$month_to_delete} deleted successfully!</p>";
+    echo "<p class='message'>Report deleted successfully!</p>";
 }
 
 if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['generate_report'])) {
@@ -34,7 +34,7 @@ if ($_SERVER["REQUEST_METHOD"] == "POST" && isset($_POST['generate_report'])) {
     $stmt->execute([$selected_month, $total_revenue, $total_expenses, $profit, $total_revenue, $total_expenses, $profit]);
 }
 
-$reports = $pdo->query("SELECT * FROM reports ORDER BY month DESC")->fetchAll(PDO::FETCH_ASSOC);
+$reports = $pdo->query("SELECT id, month, total_revenue, total_expenses, profit FROM reports ORDER BY month DESC")->fetchAll(PDO::FETCH_ASSOC);
 ?>
 
 <!DOCTYPE html>
@@ -226,7 +226,7 @@ $reports = $pdo->query("SELECT * FROM reports ORDER BY month DESC")->fetchAll(PD
                         <?= number_format($report['profit'], 2) ?>
                     </td>
                     <td>
-                        <a href="?delete_month=<?= $report['month'] ?>" onclick="return confirm('Are you sure you want to delete this report?')">Delete</a>
+                        <a href="?delete_id=<?= $report['id'] ?>" onclick="return confirm('Are you sure you want to delete this report?')">Delete</a>
                     </td>
                 </tr>
             <?php } ?>
