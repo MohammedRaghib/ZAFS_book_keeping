@@ -8,4 +8,7 @@
     <li class="nav-item">
         <a href="Purchases.php" class="nav-link">Purchases</a>
     </li>
+    <li class="nav-item">
+        <a href="Reports.php" class="nav-link">Reports</a>
+    </li>
 </nav>
