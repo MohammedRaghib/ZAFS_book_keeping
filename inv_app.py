@@ -9,6 +9,7 @@ class Database:
         self.conn = sqlite3.connect(db_name)
         self.cursor = self.conn.cursor()
         self.create_tables()
+        self._check_and_migrate_schema() # Call migration after ensuring tables exist
 
     def create_tables(self):
         self.cursor.execute("""
@@ -18,7 +19,7 @@ class Database:
                 category TEXT,
                 purchase_price REAL NOT NULL,
                 selling_price REAL NOT NULL,
-                stock_quantity INTEGER NOT NULL,
+                stock_quantity REAL NOT NULL,
                 expiry_date TEXT
             )
         """)
@@ -26,7 +27,7 @@ class Database:
             CREATE TABLE IF NOT EXISTS sales (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 product_id INTEGER NOT NULL,
-                quantity INTEGER NOT NULL,
+                quantity REAL NOT NULL,
                 sale_date TEXT NOT NULL,
                 total_price REAL NOT NULL,
                 FOREIGN KEY (product_id) REFERENCES products(id)
@@ -36,24 +37,108 @@ class Database:
             CREATE TABLE IF NOT EXISTS purchases (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 product_id INTEGER NOT NULL,
-                quantity INTEGER NOT NULL,
+                quantity REAL NOT NULL,
                 purchase_date TEXT NOT NULL,
                 cost_price REAL NOT NULL,
                 supplier_name TEXT,
                 FOREIGN KEY (product_id) REFERENCES products(id)
             )
         """)
-        # New reports table
         self.cursor.execute("""
             CREATE TABLE IF NOT EXISTS reports (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                month TEXT NOT NULL UNIQUE, -- Stores YYYY-MM format
+                month TEXT NOT NULL UNIQUE,
                 total_revenue REAL NOT NULL,
                 total_expenses REAL NOT NULL,
                 profit REAL NOT NULL
             )
         """)
         self.conn.commit()
+
+    def _check_and_migrate_schema(self):
+        tables_to_check = {
+            "products": {"column": "stock_quantity", "current_schema_sql": """
+                CREATE TABLE products_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    category TEXT,
+                    purchase_price REAL NOT NULL,
+                    selling_price REAL NOT NULL,
+                    stock_quantity REAL NOT NULL,
+                    expiry_date TEXT
+                )
+            """},
+            "sales": {"column": "quantity", "current_schema_sql": """
+                CREATE TABLE sales_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER NOT NULL,
+                    quantity REAL NOT NULL,
+                    sale_date TEXT NOT NULL,
+                    total_price REAL NOT NULL,
+                    FOREIGN KEY (product_id) REFERENCES products(id)
+                )
+            """},
+            "purchases": {"column": "quantity", "current_schema_sql": """
+                CREATE TABLE purchases_new (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    product_id INTEGER NOT NULL,
+                    quantity REAL NOT NULL,
+                    purchase_date TEXT NOT NULL,
+                    cost_price REAL NOT NULL,
+                    supplier_name TEXT,
+                    FOREIGN KEY (product_id) REFERENCES products(id)
+                )
+            """}
+        }
+
+        for table_name, details in tables_to_check.items():
+            column_name = details["column"]
+            try:
+                self.cursor.execute(f"PRAGMA table_info({table_name});")
+                columns_info = self.cursor.fetchall()
+                current_type = None
+                for col in columns_info:
+                    if col[1] == column_name:
+                        current_type = col[2].upper()
+                        break
+
+                if current_type == "INTEGER":
+                    messagebox.showinfo("Database Migration",
+                                        f"Migrating '{column_name}' in '{table_name}' table from INTEGER to REAL. "
+                                        "This may take a moment.")
+                    self._perform_migration(table_name, details["current_schema_sql"])
+                    messagebox.showinfo("Database Migration",
+                                        f"Migration for '{column_name}' in '{table_name}' complete.")
+            except sqlite3.OperationalError as e:
+                if "no such table" not in str(e):
+                    messagebox.showerror("Database Error", f"Error checking schema for {table_name}: {e}")
+            except Exception as e:
+                messagebox.showerror("Migration Error", f"Failed to migrate schema for {table_name}: {e}")
+
+    def _perform_migration(self, table_name, new_table_schema_sql):
+        old_table_name = f"{table_name}_old"
+        self.conn.execute("BEGIN TRANSACTION;")
+        try:
+            self.cursor.execute(f"ALTER TABLE {table_name} RENAME TO {old_table_name};")
+            new_table_create_sql = new_table_schema_sql.replace(f"{table_name}_new", table_name)
+            self.cursor.execute(new_table_create_sql)
+
+            self.cursor.execute(f"PRAGMA table_info({old_table_name});")
+            old_columns = [col[1] for col in self.cursor.fetchall()]
+            columns_str = ", ".join(old_columns)
+            placeholders = ", ".join(["?" for _ in old_columns])
+
+            self.cursor.execute(f"SELECT {columns_str} FROM {old_table_name};")
+            data_to_copy = self.cursor.fetchall()
+
+            self.cursor.executemany(f"INSERT INTO {table_name} ({columns_str}) VALUES ({placeholders});", data_to_copy)
+
+            self.cursor.execute(f"DROP TABLE {old_table_name};")
+
+            self.conn.commit()
+        except Exception as e:
+            self.conn.rollback()
+            raise Exception(f"Migration failed for table {table_name}: {e}")
 
     def add_product(self, name, category, purchase_price, selling_price, stock_quantity, expiry_date):
         try:
@@ -196,9 +281,14 @@ class Database:
             stock_adjustment = new_quantity - previous_quantity
 
             if stock_adjustment < 0:
-                current_stock = self.get_product_by_id(product_id)[5]
-                if current_stock < abs(stock_adjustment):
-                    messagebox.showerror("Stock Error", f"Cannot reduce purchase quantity. Not enough stock to deduct {abs(stock_adjustment)} units. Current stock: {current_stock}")
+                current_product_data = self.get_product_by_id(product_id)
+                if current_product_data:
+                    current_stock = current_product_data[5]
+                    if current_stock < abs(stock_adjustment):
+                        messagebox.showerror("Stock Error", f"Cannot reduce purchase quantity. Not enough stock to deduct {abs(stock_adjustment):.2f} units. Current stock: {current_stock:.2f}")
+                        return False
+                else:
+                    messagebox.showerror("Error", "Product not found for stock check.")
                     return False
 
             self.cursor.execute("UPDATE purchases SET product_id=?, quantity=?, cost_price=?, purchase_date=?, supplier_name=? WHERE id=?",
@@ -219,10 +309,14 @@ class Database:
 
             if deleted_purchase_data:
                 product_id, quantity = deleted_purchase_data
-                current_stock = self.get_product_by_id(product_id)[5]
-
-                if current_stock < quantity:
-                    messagebox.showerror("Stock Error", f"Cannot delete this purchase. Deleting would make stock negative. Current stock: {current_stock}, Purchase quantity: {quantity}")
+                current_product_data = self.get_product_by_id(product_id)
+                if current_product_data:
+                    current_stock = current_product_data[5]
+                    if current_stock < quantity:
+                        messagebox.showerror("Stock Error", f"Cannot delete this purchase. Deleting would make stock negative. Current stock: {current_stock:.2f}, Purchase quantity: {quantity:.2f}")
+                        return False
+                else:
+                    messagebox.showerror("Error", "Product not found for stock check.")
                     return False
 
                 self.cursor.execute("DELETE FROM purchases WHERE id = ?", (purchase_id,))
@@ -234,12 +328,11 @@ class Database:
             messagebox.showerror("Error", f"Failed to delete purchase: {e}")
             return False
 
-    # --- Report Specific Database Methods ---
-    def calculate_monthly_revenue(self, month_str): # month_str is 'YYYY-MM'
+    def calculate_monthly_revenue(self, month_str):
         self.cursor.execute("SELECT SUM(total_price) FROM sales WHERE SUBSTR(sale_date, 1, 7) = ?", (month_str,))
         return self.cursor.fetchone()[0] or 0.0
 
-    def calculate_monthly_expenses(self, month_str): # month_str is 'YYYY-MM'
+    def calculate_monthly_expenses(self, month_str):
         self.cursor.execute("SELECT SUM(quantity * cost_price) FROM purchases WHERE SUBSTR(purchase_date, 1, 7) = ?", (month_str,))
         return self.cursor.fetchone()[0] or 0.0
 
@@ -309,7 +402,7 @@ class InventoryApp(tk.Tk):
         self.container.pack(fill="both", expand=True, padx=10, pady=10)
 
         self.frames = {}
-        for F in (ProductsFrame, SalesFrame, PurchasesFrame, ReportsFrame): # Added ReportsFrame
+        for F in (ProductsFrame, SalesFrame, PurchasesFrame, ReportsFrame):
             page_name = F.__name__.replace("Frame", "").lower()
             frame = F(parent=self.container, controller=self)
             self.frames[page_name] = frame
@@ -460,12 +553,12 @@ class ProductsFrame(tk.Frame):
         try:
             purchase_price = float(purchase_price_str)
             selling_price = float(selling_price_str)
-            stock_quantity = int(stock_quantity_str)
+            stock_quantity = float(stock_quantity_str)
             if purchase_price < 0 or selling_price < 0 or stock_quantity < 0:
                 messagebox.showerror("Input Error", "Prices and stock must be non-negative.")
                 return
         except ValueError:
-            messagebox.showerror("Input Error", "Prices must be numbers and Stock Quantity an integer.")
+            messagebox.showerror("Input Error", "Prices and Stock Quantity must be numbers.")
             return
 
         if expiry_date == "":
@@ -477,7 +570,7 @@ class ProductsFrame(tk.Frame):
             self.refresh_data()
             self.controller.frames["sales"].refresh_data()
             self.controller.frames["purchases"].refresh_data()
-            self.controller.frames["reports"].refresh_data() # Refresh reports
+            self.controller.frames["reports"].refresh_data()
 
     def load_product_for_edit(self):
         selected_item = self.products_tree.focus()
@@ -526,12 +619,12 @@ class ProductsFrame(tk.Frame):
         try:
             purchase_price = float(purchase_price_str)
             selling_price = float(selling_price_str)
-            stock_quantity = int(stock_quantity_str)
+            stock_quantity = float(stock_quantity_str)
             if purchase_price < 0 or selling_price < 0 or stock_quantity < 0:
                 messagebox.showerror("Input Error", "Prices and stock must be non-negative.")
                 return
         except ValueError:
-            messagebox.showerror("Input Error", "Prices must be numbers and Stock Quantity an integer.")
+            messagebox.showerror("Input Error", "Prices and Stock Quantity must be numbers.")
             return
 
         if expiry_date == "":
@@ -543,7 +636,7 @@ class ProductsFrame(tk.Frame):
             self.refresh_data()
             self.controller.frames["sales"].refresh_data()
             self.controller.frames["purchases"].refresh_data()
-            self.controller.frames["reports"].refresh_data() # Refresh reports
+            self.controller.frames["reports"].refresh_data()
 
     def delete_product(self):
         selected_item = self.products_tree.focus()
@@ -561,7 +654,7 @@ class ProductsFrame(tk.Frame):
                 self.reset_form()
                 self.controller.frames["sales"].refresh_data()
                 self.controller.frames["purchases"].refresh_data()
-                self.controller.frames["reports"].refresh_data() # Refresh reports
+                self.controller.frames["reports"].refresh_data()
 
     def reset_form(self):
         self.edit_mode = False
@@ -584,7 +677,9 @@ class ProductsFrame(tk.Frame):
             self.products_tree.delete(item)
         products = self.controller.db.get_products()
         for product in products:
-            self.products_tree.insert("", "end", values=product)
+            formatted_product = list(product)
+            formatted_product[5] = f"{product[5]:.2f}"
+            self.products_tree.insert("", "end", values=formatted_product)
         self.filter_products()
 
     def filter_products(self, event=None):
@@ -604,7 +699,9 @@ class ProductsFrame(tk.Frame):
         ]
 
         for product in filtered_products:
-            self.products_tree.insert("", "end", values=product)
+            formatted_product = list(product)
+            formatted_product[5] = f"{product[5]:.2f}"
+            self.products_tree.insert("", "end", values=formatted_product)
 
     def clear_search_placeholder(self, event):
         if self.search_entry.get() == "Search products...":
@@ -629,7 +726,7 @@ class SalesFrame(tk.Frame):
         self.controller = controller
         self.edit_mode = False
         self.current_sale_id = None
-        self.previous_sale_quantity = 0
+        self.previous_sale_quantity = 0.0
 
         self.input_frame = tk.LabelFrame(self, text="Record New Sale", padx=10, pady=10)
         self.input_frame.pack(pady=10, fill="x")
@@ -758,14 +855,16 @@ class SalesFrame(tk.Frame):
             self.sales_tree.delete(item)
         sales = self.controller.db.get_sales_report()
         for sale in sales:
-            self.sales_tree.insert("", "end", values=sale)
+            formatted_sale = list(sale)
+            formatted_sale[2] = f"{sale[2]:.2f}"
+            self.sales_tree.insert("", "end", values=formatted_sale)
         self.filter_sales()
 
     def on_product_select(self, event=None):
         selected_product_name = self.product_combobox.get()
         if selected_product_name in self.product_data:
             product_info = self.product_data[selected_product_name]
-            self.available_stock_label.config(text=str(product_info["stock"]))
+            self.available_stock_label.config(text=f"{product_info['stock']:.2f}")
             self.price_per_unit_label.config(text=f"{product_info['price']:.2f}")
             self.calculate_total_price()
         else:
@@ -780,7 +879,7 @@ class SalesFrame(tk.Frame):
             return
 
         try:
-            quantity = int(self.quantity_entry.get())
+            quantity = float(self.quantity_entry.get())
             price_per_unit = self.product_data[selected_product_name]["price"]
             total_price = quantity * price_per_unit
             self.total_price_label.config(text=f"{total_price:.2f}")
@@ -809,12 +908,12 @@ class SalesFrame(tk.Frame):
             return
 
         try:
-            quantity = int(quantity_str)
+            quantity = float(quantity_str)
             if quantity <= 0:
-                messagebox.showerror("Input Error", "Quantity must be a positive integer.")
+                messagebox.showerror("Input Error", "Quantity must be a positive number.")
                 return
         except ValueError:
-            messagebox.showerror("Input Error", "Quantity must be an integer.")
+            messagebox.showerror("Input Error", "Quantity must be a number.")
             return
 
         product_info = self.product_data[selected_product_name]
@@ -823,17 +922,17 @@ class SalesFrame(tk.Frame):
         price_per_unit = product_info["price"]
 
         if quantity > current_stock:
-            messagebox.showerror("Stock Error", f"Not enough stock available. Current stock: {current_stock}")
+            messagebox.showerror("Stock Error", f"Not enough stock available. Current stock: {current_stock:.2f}")
             return
 
         total_price = quantity * price_per_unit
 
         if self.controller.db.record_sale(product_id, quantity, total_price, sale_date):
-            messagebox.showinfo("Success", f"Sale of {quantity} x {selected_product_name} recorded.")
+            messagebox.showinfo("Success", f"Sale of {quantity:.2f} x {selected_product_name} recorded.")
             self.reset_form()
             self.refresh_data()
             self.controller.frames["products"].refresh_data()
-            self.controller.frames["reports"].refresh_data() # Refresh reports
+            self.controller.frames["reports"].refresh_data()
 
     def load_sale_for_edit(self):
         selected_item = self.sales_tree.focus()
@@ -857,7 +956,7 @@ class SalesFrame(tk.Frame):
                 self.on_product_select()
 
             self.quantity_entry.delete(0, tk.END)
-            self.quantity_entry.insert(0, sale_data[2])
+            self.quantity_entry.insert(0, f"{sale_data[2]:.2f}")
 
             self.total_price_label.config(text=f"{sale_data[3]:.2f}")
 
@@ -885,12 +984,12 @@ class SalesFrame(tk.Frame):
             return
 
         try:
-            new_quantity = int(new_quantity_str)
+            new_quantity = float(new_quantity_str)
             if new_quantity <= 0:
-                messagebox.showerror("Input Error", "Quantity must be a positive integer.")
+                messagebox.showerror("Input Error", "Quantity must be a positive number.")
                 return
         except ValueError:
-            messagebox.showerror("Input Error", "Quantity must be an integer.")
+            messagebox.showerror("Input Error", "Quantity must be a number.")
             return
 
         product_info = self.product_data[selected_product_name]
@@ -901,7 +1000,7 @@ class SalesFrame(tk.Frame):
         stock_needed = new_quantity - self.previous_sale_quantity
 
         if stock_needed > 0 and current_stock < stock_needed:
-            messagebox.showerror("Stock Error", f"Not enough stock available to increase quantity. Available: {current_stock}")
+            messagebox.showerror("Stock Error", f"Not enough stock available to increase quantity. Available: {current_stock:.2f}")
             return
 
         new_total_price = new_quantity * price_per_unit
@@ -911,7 +1010,7 @@ class SalesFrame(tk.Frame):
             self.reset_form()
             self.refresh_data()
             self.controller.frames["products"].refresh_data()
-            self.controller.frames["reports"].refresh_data() # Refresh reports
+            self.controller.frames["reports"].refresh_data()
 
     def delete_sale(self):
         selected_item = self.sales_tree.focus()
@@ -928,12 +1027,12 @@ class SalesFrame(tk.Frame):
                 self.refresh_data()
                 self.reset_form()
                 self.controller.frames["products"].refresh_data()
-                self.controller.frames["reports"].refresh_data() # Refresh reports
+                self.controller.frames["reports"].refresh_data()
 
     def reset_form(self):
         self.edit_mode = False
         self.current_sale_id = None
-        self.previous_sale_quantity = 0
+        self.previous_sale_quantity = 0.0
         self.product_combobox.set("")
         self.quantity_entry.delete(0, tk.END)
         self.available_stock_label.config(text="N/A")
@@ -961,7 +1060,9 @@ class SalesFrame(tk.Frame):
         ]
 
         for sale in filtered_sales:
-            self.sales_tree.insert("", "end", values=sale)
+            formatted_sale = list(sale)
+            formatted_sale[2] = f"{sale[2]:.2f}"
+            self.sales_tree.insert("", "end", values=formatted_sale)
 
     def clear_search_placeholder(self, event):
         if self.search_entry.get() == "Search sales...":
@@ -986,7 +1087,7 @@ class PurchasesFrame(tk.Frame):
         self.controller = controller
         self.edit_mode = False
         self.current_purchase_id = None
-        self.previous_purchase_quantity = 0
+        self.previous_purchase_quantity = 0.0
 
         self.input_frame = tk.LabelFrame(self, text="Add New Purchase", padx=10, pady=10)
         self.input_frame.pack(pady=10, fill="x")
@@ -1112,7 +1213,9 @@ class PurchasesFrame(tk.Frame):
             self.purchases_tree.delete(item)
         purchases = self.controller.db.get_purchases_report()
         for purchase in purchases:
-            self.purchases_tree.insert("", "end", values=purchase)
+            formatted_purchase = list(purchase)
+            formatted_purchase[2] = f"{purchase[2]:.2f}"
+            self.purchases_tree.insert("", "end", values=formatted_purchase)
         self.filter_purchases()
 
     def on_product_select(self, event=None):
@@ -1146,24 +1249,24 @@ class PurchasesFrame(tk.Frame):
             return
 
         try:
-            quantity = int(quantity_str)
+            quantity = float(quantity_str)
             cost_price = float(cost_price_str)
             if quantity <= 0 or cost_price < 0:
                 messagebox.showerror("Input Error", "Quantity must be positive and Cost Price non-negative.")
                 return
         except ValueError:
-            messagebox.showerror("Input Error", "Quantity must be an integer and Cost Price a number.")
+            messagebox.showerror("Input Error", "Quantity must be a number and Cost Price a number.")
             return
 
         product_info = self.product_data[selected_product_name]
         product_id = product_info["id"]
 
         if self.controller.db.record_purchase(product_id, quantity, cost_price, purchase_date, supplier_name):
-            messagebox.showinfo("Success", f"Purchase of {quantity} x {selected_product_name} recorded.")
+            messagebox.showinfo("Success", f"Purchase of {quantity:.2f} x {selected_product_name} recorded.")
             self.reset_form()
             self.refresh_data()
             self.controller.frames["products"].refresh_data()
-            self.controller.frames["reports"].refresh_data() # Refresh reports
+            self.controller.frames["reports"].refresh_data()
 
     def load_purchase_for_edit(self):
         selected_item = self.purchases_tree.focus()
@@ -1186,7 +1289,7 @@ class PurchasesFrame(tk.Frame):
                 self.product_combobox.set(product_name)
 
             self.quantity_entry.delete(0, tk.END)
-            self.quantity_entry.insert(0, purchase_data[2])
+            self.quantity_entry.insert(0, f"{purchase_data[2]:.2f}")
 
             self.cost_price_entry.delete(0, tk.END)
             self.cost_price_entry.insert(0, f"{purchase_data[3]:.2f}")
@@ -1220,13 +1323,13 @@ class PurchasesFrame(tk.Frame):
             return
 
         try:
-            new_quantity = int(new_quantity_str)
+            new_quantity = float(new_quantity_str)
             new_cost_price = float(new_cost_price_str)
             if new_quantity <= 0 or new_cost_price < 0:
                 messagebox.showerror("Input Error", "Quantity must be positive and Cost Price non-negative.")
                 return
         except ValueError:
-            messagebox.showerror("Input Error", "Quantity must be an integer and Cost Price a number.")
+            messagebox.showerror("Input Error", "Quantity must be a number and Cost Price a number.")
             return
 
         product_info = self.product_data[selected_product_name]
@@ -1237,7 +1340,7 @@ class PurchasesFrame(tk.Frame):
             self.reset_form()
             self.refresh_data()
             self.controller.frames["products"].refresh_data()
-            self.controller.frames["reports"].refresh_data() # Refresh reports
+            self.controller.frames["reports"].refresh_data()
 
     def delete_purchase(self):
         selected_item = self.purchases_tree.focus()
@@ -1254,12 +1357,12 @@ class PurchasesFrame(tk.Frame):
                 self.refresh_data()
                 self.reset_form()
                 self.controller.frames["products"].refresh_data()
-                self.controller.frames["reports"].refresh_data() # Refresh reports
+                self.controller.frames["reports"].refresh_data()
 
     def reset_form(self):
         self.edit_mode = False
         self.current_purchase_id = None
-        self.previous_purchase_quantity = 0
+        self.previous_purchase_quantity = 0.0
         self.product_combobox.set("")
         self.quantity_entry.delete(0, tk.END)
         self.cost_price_entry.delete(0, tk.END)
@@ -1287,7 +1390,9 @@ class PurchasesFrame(tk.Frame):
         ]
 
         for purchase in filtered_purchases:
-            self.purchases_tree.insert("", "end", values=purchase)
+            formatted_purchase = list(purchase)
+            formatted_purchase[2] = f"{purchase[2]:.2f}"
+            self.purchases_tree.insert("", "end", values=formatted_purchase)
 
     def clear_search_placeholder(self, event):
         if self.search_entry.get() == "Search purchases...":
@@ -1306,28 +1411,25 @@ class PurchasesFrame(tk.Frame):
             self.purchases_tree.focus(item_id)
             self.context_menu.post(event.x_root, event.y_root)
 
-# --- Reports Frame ---
 class ReportsFrame(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
 
-        # Report Generation Section
-        generate_frame = tk.LabelFrame(self, text="Generate Monthly Profit Report", padx=10, pady=10)
-        generate_frame.pack(pady=10, fill="x")
+        self.input_frame = tk.LabelFrame(self, text="Generate Monthly Profit Report", padx=10, pady=10)
+        self.input_frame.pack(pady=10, fill="x")
 
-        tk.Label(generate_frame, text="Select Month:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.report_date_display = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d")) # Date picker for month
-        self.report_date_label = tk.Label(generate_frame, textvariable=self.report_date_display, width=37, anchor="w", relief="sunken", bd=1)
+        tk.Label(self.input_frame, text="Select Month:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.report_date_display = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
+        self.report_date_label = tk.Label(self.input_frame, textvariable=self.report_date_display, width=37, anchor="w", relief="sunken", bd=1)
         self.report_date_label.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
 
-        self.date_picker_button = ttk.Button(generate_frame, text="Select Date", command=self.open_date_picker)
+        self.date_picker_button = ttk.Button(self.input_frame, text="Select Date", command=self.open_date_picker)
         self.date_picker_button.grid(row=0, column=2, padx=5, pady=5)
 
-        generate_btn = ttk.Button(generate_frame, text="Generate Report", command=self.generate_report)
+        generate_btn = ttk.Button(self.input_frame, text="Generate Report", command=self.generate_report)
         generate_btn.grid(row=1, column=0, columnspan=3, pady=10)
 
-        # Stored Reports Section
         reports_display_frame = tk.LabelFrame(self, text="Stored Monthly Reports", padx=10, pady=10)
         reports_display_frame.pack(pady=10, fill="both", expand=True)
 
@@ -1426,19 +1528,17 @@ class ReportsFrame(tk.Frame):
     def refresh_data(self):
         for item in self.reports_tree.get_children():
             self.reports_tree.delete(item)
-        
+
         reports = self.controller.db.get_stored_reports()
         for report in reports:
-            # Format currency values for display
             formatted_report = (
-                report[0], # ID
-                report[1], # Month
-                f"{report[2]:.2f}", # Revenue
-                f"{report[3]:.2f}", # Expenses
-                f"{report[4]:.2f}" # Profit
+                report[0],
+                report[1],
+                f"{report[2]:.2f}",
+                f"{report[3]:.2f}",
+                f"{report[4]:.2f}"
             )
             item_id = self.reports_tree.insert("", "end", values=formatted_report)
-            # Apply color tag for profit
             profit_value = report[4]
             if profit_value < 0:
                 self.reports_tree.tag_configure('negative_profit', foreground='red')
