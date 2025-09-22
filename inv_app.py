@@ -1,15 +1,17 @@
+from ttkwidgets.autocomplete import AutocompleteCombobox
 import tkinter as tk
-from tkinter import ttk, messagebox
-import sqlite3
+from tkinter import ttk, messagebox, filedialog
+import sqlite3, os
 from datetime import datetime
 from tkcalendar import Calendar
+import pandas as pd
 
 class Database:
     def __init__(self, db_name="inventory.db"):
         self.conn = sqlite3.connect(db_name)
         self.cursor = self.conn.cursor()
         self.create_tables()
-        self._check_and_migrate_schema() # Call migration after ensuring tables exist
+        self._check_and_migrate_schema()
 
     def create_tables(self):
         self.cursor.execute("""
@@ -104,11 +106,11 @@ class Database:
 
                 if current_type == "INTEGER":
                     messagebox.showinfo("Database Migration",
-                                        f"Migrating '{column_name}' in '{table_name}' table from INTEGER to REAL. "
-                                        "This may take a moment.")
+                                         f"Migrating '{column_name}' in '{table_name}' table from INTEGER to REAL. "
+                                         "This may take a moment.")
                     self._perform_migration(table_name, details["current_schema_sql"])
                     messagebox.showinfo("Database Migration",
-                                        f"Migration for '{column_name}' in '{table_name}' complete.")
+                                         f"Migration for '{column_name}' in '{table_name}' complete.")
             except sqlite3.OperationalError as e:
                 if "no such table" not in str(e):
                     messagebox.showerror("Database Error", f"Error checking schema for {table_name}: {e}")
@@ -143,7 +145,7 @@ class Database:
     def add_product(self, name, category, purchase_price, selling_price, stock_quantity, expiry_date):
         try:
             self.cursor.execute("INSERT INTO products (name, category, purchase_price, selling_price, stock_quantity, expiry_date) VALUES (?, ?, ?, ?, ?, ?)",
-                                (name, category, purchase_price, selling_price, stock_quantity, expiry_date))
+                                 (name, category, purchase_price, selling_price, stock_quantity, expiry_date))
             self.conn.commit()
             return True
         except sqlite3.IntegrityError:
@@ -168,7 +170,7 @@ class Database:
     def update_product(self, product_id, name, category, purchase_price, selling_price, stock_quantity, expiry_date):
         try:
             self.cursor.execute("UPDATE products SET name=?, category=?, purchase_price=?, selling_price=?, stock_quantity=?, expiry_date=? WHERE id=?",
-                                (name, category, purchase_price, selling_price, stock_quantity, expiry_date, product_id))
+                                 (name, category, purchase_price, selling_price, stock_quantity, expiry_date, product_id))
             self.conn.commit()
             return True
         except sqlite3.IntegrityError:
@@ -190,7 +192,7 @@ class Database:
     def update_product_stock(self, product_id, quantity_change):
         try:
             self.cursor.execute("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?",
-                                (quantity_change, product_id))
+                                 (quantity_change, product_id))
             self.conn.commit()
             return True
         except Exception as e:
@@ -200,7 +202,7 @@ class Database:
     def record_sale(self, product_id, quantity, total_price, sale_date):
         try:
             self.cursor.execute("INSERT INTO sales (product_id, quantity, total_price, sale_date) VALUES (?, ?, ?, ?)",
-                                (product_id, quantity, total_price, sale_date))
+                                 (product_id, quantity, total_price, sale_date))
             self.conn.commit()
             self.update_product_stock(product_id, -quantity)
             return True
@@ -226,7 +228,7 @@ class Database:
             stock_adjustment = new_quantity - previous_quantity
 
             self.cursor.execute("UPDATE sales SET product_id=?, quantity=?, total_price=?, sale_date=? WHERE id=?",
-                                (product_id, new_quantity, new_total_price, new_sale_date, sale_id))
+                                 (product_id, new_quantity, new_total_price, new_sale_date, sale_id))
             self.conn.commit()
 
             if stock_adjustment != 0:
@@ -255,7 +257,7 @@ class Database:
     def record_purchase(self, product_id, quantity, cost_price, purchase_date, supplier_name):
         try:
             self.cursor.execute("INSERT INTO purchases (product_id, quantity, cost_price, purchase_date, supplier_name) VALUES (?, ?, ?, ?, ?)",
-                                (product_id, quantity, cost_price, purchase_date, supplier_name))
+                                 (product_id, quantity, cost_price, purchase_date, supplier_name))
             self.conn.commit()
             self.update_product_stock(product_id, quantity)
             return True
@@ -292,7 +294,7 @@ class Database:
                     return False
 
             self.cursor.execute("UPDATE purchases SET product_id=?, quantity=?, cost_price=?, purchase_date=?, supplier_name=? WHERE id=?",
-                                (product_id, new_quantity, new_cost_price, new_purchase_date, new_supplier_name, purchase_id))
+                                 (product_id, new_quantity, new_cost_price, new_purchase_date, new_supplier_name, purchase_id))
             self.conn.commit()
 
             if stock_adjustment != 0:
@@ -335,6 +337,31 @@ class Database:
     def calculate_monthly_expenses(self, month_str):
         self.cursor.execute("SELECT SUM(quantity * cost_price) FROM purchases WHERE SUBSTR(purchase_date, 1, 7) = ?", (month_str,))
         return self.cursor.fetchone()[0] or 0.0
+
+    def calculate_product_profit(self, product_id):
+        self.cursor.execute("SELECT SUM(total_price) FROM sales WHERE product_id = ?", (product_id,))
+        total_revenue = self.cursor.fetchone()[0] or 0.0
+
+        self.cursor.execute("SELECT SUM(cost_price * quantity) FROM purchases WHERE product_id = ?", (product_id,))
+        total_expenses = self.cursor.fetchone()[0] or 0.0
+        
+        profit = total_revenue - total_expenses
+        return total_revenue, total_expenses, profit
+        
+    def get_monthly_sales_by_product(self, month_str):
+        self.cursor.execute("""
+            SELECT p.name, SUM(s.quantity)
+            FROM sales s
+            JOIN products p ON s.product_id = p.id
+            WHERE SUBSTR(s.sale_date, 1, 7) = ?
+            GROUP BY p.name
+            ORDER BY p.name ASC
+        """, (month_str,))
+        return self.cursor.fetchall()
+        
+    def get_available_report_months(self):
+        self.cursor.execute("SELECT DISTINCT SUBSTR(sale_date, 1, 7) FROM sales ORDER BY SUBSTR(sale_date, 1, 7) DESC")
+        return [row[0] for row in self.cursor.fetchall()]
 
     def save_or_update_report(self, month, total_revenue, total_expenses, profit):
         try:
@@ -727,12 +754,13 @@ class SalesFrame(tk.Frame):
         self.edit_mode = False
         self.current_sale_id = None
         self.previous_sale_quantity = 0.0
+        self.original_price_per_unit = 0.0
 
         self.input_frame = tk.LabelFrame(self, text="Record New Sale", padx=10, pady=10)
         self.input_frame.pack(pady=10, fill="x")
 
         tk.Label(self.input_frame, text="Product Name:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.product_combobox = ttk.Combobox(self.input_frame, width=37)
+        self.product_combobox = AutocompleteCombobox(self.input_frame, width=37, completevalues=[])
         self.product_combobox.grid(row=0, column=1, padx=5, pady=5)
         self.product_combobox.bind("<<ComboboxSelected>>", self.on_product_select)
 
@@ -827,9 +855,9 @@ class SalesFrame(tk.Frame):
                 pass
 
         cal = Calendar(top, selectmode='day',
-                       year=initial_date.year,
-                       month=initial_date.month,
-                       day=initial_date.day)
+                        year=initial_date.year,
+                        month=initial_date.month,
+                        day=initial_date.day)
         cal.pack(pady=20)
 
         confirm_button = ttk.Button(top, text="Select", command=grab_date)
@@ -842,7 +870,7 @@ class SalesFrame(tk.Frame):
         for prod_id, name, category, purchase_price, selling_price, stock, expiry_date in products:
             product_names.append(name)
             self.product_data[name] = {"id": prod_id, "price": selling_price, "stock": stock}
-        self.product_combobox['values'] = product_names
+        self.product_combobox.set_completion_list(product_names)
         self.product_combobox.set("")
 
         self.available_stock_label.config(text="N/A")
@@ -850,6 +878,7 @@ class SalesFrame(tk.Frame):
         self.quantity_entry.delete(0, tk.END)
         self.total_price_label.config(text="0.00")
         self.sale_date_display.set(datetime.now().strftime("%Y-%m-%d"))
+        self.original_price_per_unit = 0.0
 
         for item in self.sales_tree.get_children():
             self.sales_tree.delete(item)
@@ -866,26 +895,31 @@ class SalesFrame(tk.Frame):
             product_info = self.product_data[selected_product_name]
             self.available_stock_label.config(text=f"{product_info['stock']:.2f}")
             self.price_per_unit_label.config(text=f"{product_info['price']:.2f}")
+            self.original_price_per_unit = product_info['price']
             self.calculate_total_price()
         else:
             self.available_stock_label.config(text="N/A")
             self.price_per_unit_label.config(text="N/A")
             self.total_price_label.config(text="0.00")
+            self.original_price_per_unit = 0.0
 
     def calculate_total_price(self, event=None):
-        selected_product_name = self.product_combobox.get()
-        if selected_product_name not in self.product_data:
-            self.total_price_label.config(text="0.00")
-            return
-
         try:
             quantity = float(self.quantity_entry.get())
-            price_per_unit = self.product_data[selected_product_name]["price"]
-            total_price = quantity * price_per_unit
-            self.total_price_label.config(text=f"{total_price:.2f}")
-        except ValueError:
-            self.total_price_label.config(text="0.00")
-        except Exception:
+            
+            # Use the correct price for the calculation
+            price_per_unit = self.original_price_per_unit
+            if not self.edit_mode:
+                selected_product_name = self.product_combobox.get()
+                if selected_product_name in self.product_data:
+                    price_per_unit = self.product_data[selected_product_name]["price"]
+
+            if price_per_unit != 0:
+                total_price = quantity * price_per_unit
+                self.total_price_label.config(text=f"{total_price:.2f}")
+            else:
+                self.total_price_label.config(text="0.00")
+        except (ValueError, KeyError):
             self.total_price_label.config(text="0.00")
 
     def handle_sale_action(self):
@@ -953,15 +987,18 @@ class SalesFrame(tk.Frame):
             if product_info:
                 product_name = product_info[1]
                 self.product_combobox.set(product_name)
-                self.on_product_select()
+                
+                available_stock = product_info[5] + self.previous_sale_quantity
+                self.available_stock_label.config(text=f"{available_stock:.2f}")
+
+                price_per_unit_from_sale = sale_data[3] / sale_data[2] if sale_data[2] != 0 else 0
+                self.original_price_per_unit = price_per_unit_from_sale
+                self.price_per_unit_label.config(text=f"{price_per_unit_from_sale:.2f}")
 
             self.quantity_entry.delete(0, tk.END)
             self.quantity_entry.insert(0, f"{sale_data[2]:.2f}")
-
             self.total_price_label.config(text=f"{sale_data[3]:.2f}")
-
             self.sale_date_display.set(sale_data[4])
-
             self.action_button.config(text="Update Sale")
             self.cancel_button.grid()
             self.input_frame.config(text=f"Edit Sale (ID: {self.current_sale_id})")
@@ -995,7 +1032,7 @@ class SalesFrame(tk.Frame):
         product_info = self.product_data[selected_product_name]
         product_id = product_info["id"]
         current_stock = product_info["stock"]
-        price_per_unit = product_info["price"]
+        price_per_unit = self.original_price_per_unit
 
         stock_needed = new_quantity - self.previous_sale_quantity
 
@@ -1033,6 +1070,7 @@ class SalesFrame(tk.Frame):
         self.edit_mode = False
         self.current_sale_id = None
         self.previous_sale_quantity = 0.0
+        self.original_price_per_unit = 0.0
         self.product_combobox.set("")
         self.quantity_entry.delete(0, tk.END)
         self.available_stock_label.config(text="N/A")
@@ -1093,7 +1131,7 @@ class PurchasesFrame(tk.Frame):
         self.input_frame.pack(pady=10, fill="x")
 
         tk.Label(self.input_frame, text="Product Name:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.product_combobox = ttk.Combobox(self.input_frame, width=37)
+        self.product_combobox = AutocompleteCombobox(self.input_frame, width=37, completevalues=[])
         self.product_combobox.grid(row=0, column=1, padx=5, pady=5)
         self.product_combobox.bind("<<ComboboxSelected>>", self.on_product_select)
 
@@ -1201,7 +1239,7 @@ class PurchasesFrame(tk.Frame):
         for prod_id, name, category, purchase_price, selling_price, stock, expiry_date in products:
             product_names.append(name)
             self.product_data[name] = {"id": prod_id, "purchase_price": purchase_price, "stock": stock}
-        self.product_combobox['values'] = product_names
+        self.product_combobox.set_completion_list(product_names)
         self.product_combobox.set("")
 
         self.quantity_entry.delete(0, tk.END)
@@ -1415,145 +1453,163 @@ class ReportsFrame(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
         self.controller = controller
+        self.current_report_data = []
+        self.current_report_type = None
 
-        self.input_frame = tk.LabelFrame(self, text="Generate Monthly Profit Report", padx=10, pady=10)
-        self.input_frame.pack(pady=10, fill="x")
+        self.input_frame_product = tk.LabelFrame(self, text="Generate Product Report", padx=10, pady=10)
+        self.input_frame_product.pack(pady=10, fill="x")
 
-        tk.Label(self.input_frame, text="Select Month:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.report_date_display = tk.StringVar(value=datetime.now().strftime("%Y-%m-%d"))
-        self.report_date_label = tk.Label(self.input_frame, textvariable=self.report_date_display, width=37, anchor="w", relief="sunken", bd=1)
-        self.report_date_label.grid(row=0, column=1, padx=5, pady=5, sticky="ew")
+        tk.Label(self.input_frame_product, text="Select Product:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.product_combobox = AutocompleteCombobox(self.input_frame_product, width=37, completevalues=[])
+        self.product_combobox.grid(row=0, column=1, padx=5, pady=5)
 
-        self.date_picker_button = ttk.Button(self.input_frame, text="Select Date", command=self.open_date_picker)
-        self.date_picker_button.grid(row=0, column=2, padx=5, pady=5)
+        generate_btn_product = ttk.Button(self.input_frame_product, text="Generate Report", command=self.generate_product_report)
+        generate_btn_product.grid(row=1, column=0, columnspan=2, pady=10)
+        
+        tk.Frame(self, height=2, bg="gray").pack(fill="x", pady=10)
 
-        generate_btn = ttk.Button(self.input_frame, text="Generate Report", command=self.generate_report)
-        generate_btn.grid(row=1, column=0, columnspan=3, pady=10)
+        self.input_frame_monthly = tk.LabelFrame(self, text="Generate Monthly Sales Report", padx=10, pady=10)
+        self.input_frame_monthly.pack(pady=10, fill="x")
+        
+        tk.Label(self.input_frame_monthly, text="Select Month (YYYY-MM):").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.month_combobox = ttk.Combobox(self.input_frame_monthly, width=37)
+        self.month_combobox.grid(row=0, column=1, padx=5, pady=5)
+        
+        generate_btn_monthly = ttk.Button(self.input_frame_monthly, text="Generate Report", command=self.generate_monthly_report)
+        generate_btn_monthly.grid(row=1, column=0, columnspan=2, pady=10)
 
-        reports_display_frame = tk.LabelFrame(self, text="Stored Monthly Reports", padx=10, pady=10)
+        reports_display_frame = tk.LabelFrame(self, text="Report Details", padx=10, pady=10)
         reports_display_frame.pack(pady=10, fill="both", expand=True)
 
         tree_frame = tk.Frame(reports_display_frame)
         tree_frame.pack(fill="both", expand=True)
 
-        self.reports_tree = ttk.Treeview(tree_frame, columns=("ID", "Month", "Revenue", "Expenses", "Profit"), show="headings")
-        self.reports_tree.heading("ID", text="ID")
-        self.reports_tree.heading("Month", text="Month (YYYY-MM)")
-        self.reports_tree.heading("Revenue", text="Total Revenue")
-        self.reports_tree.heading("Expenses", text="Total Expenses")
-        self.reports_tree.heading("Profit", text="Profit")
-
-        self.reports_tree.column("ID", width=30, anchor="center")
-        self.reports_tree.column("Month", width=100, anchor="center")
-        self.reports_tree.column("Revenue", width=120, anchor="e")
-        self.reports_tree.column("Expenses", width=120, anchor="e")
-        self.reports_tree.column("Profit", width=120, anchor="e")
-
+        self.reports_tree = ttk.Treeview(tree_frame)
+        
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.reports_tree.yview)
         vsb.pack(side='right', fill='y')
         self.reports_tree.configure(yscrollcommand=vsb.set)
-
+        
         self.reports_tree.pack(side='left', fill="both", expand=True)
 
-        self.context_menu = tk.Menu(self, tearoff=0)
-        self.context_menu.add_command(label="Delete Report", command=self.delete_report)
-        self.reports_tree.bind("<Button-3>", self.show_context_menu)
-
+        self.export_btn = ttk.Button(reports_display_frame, text="Export to Excel", command=self.save_to_excel, state=tk.DISABLED)
+        self.export_btn.pack(pady=10)
+        
+        self.product_data = {}
         self.refresh_data()
 
-    def open_date_picker(self):
-        def grab_date():
-            selected_date = cal.selection_get()
-            self.report_date_display.set(selected_date.strftime("%Y-%m-%d"))
-            top.destroy()
-
-        top = tk.Toplevel(self)
-        top.title("Select Date for Report Month")
-        top.grab_set()
-
-        current_date_str = self.report_date_display.get()
-        initial_date = datetime.now().date()
-        if current_date_str:
-            try:
-                initial_date = datetime.strptime(current_date_str, "%Y-%m-%d").date()
-            except ValueError:
-                pass
-
-        cal = Calendar(top, selectmode='day',
-                       year=initial_date.year,
-                       month=initial_date.month,
-                       day=initial_date.day)
-        cal.pack(pady=20)
-
-        confirm_button = ttk.Button(top, text="Select", command=grab_date)
-        confirm_button.pack(pady=10)
-
-    def generate_report(self):
-        selected_date_str = self.report_date_display.get().strip()
-        if not selected_date_str:
-            messagebox.showerror("Input Error", "Please select a date to generate the report for its month.")
+    def generate_product_report(self):
+        selected_product_name = self.product_combobox.get()
+        if not selected_product_name:
+            messagebox.showerror("Input Error", "Please select a product to generate the report.")
             return
 
-        try:
-            selected_date_obj = datetime.strptime(selected_date_str, "%Y-%m-%d")
-            report_month = selected_date_obj.strftime("%Y-%m")
-        except ValueError:
-            messagebox.showerror("Input Error", "Invalid date format. Please use YYYY-MM-DD.")
-            return
+        self.clear_tree()
+        self.reports_tree.configure(columns=("Product", "Total Sales", "Total Expenses", "Profit"), show="headings")
+        self.reports_tree.heading("Product", text="Product Name")
+        self.reports_tree.heading("Total Sales", text="Total Revenue ($)")
+        self.reports_tree.heading("Total Expenses", text="Total Expenses ($)")
+        self.reports_tree.heading("Profit", text="Profit ($)")
+        self.reports_tree.column("Product", width=150)
+        self.reports_tree.column("Total Sales", width=120, anchor="e")
+        self.reports_tree.column("Total Expenses", width=120, anchor="e")
+        self.reports_tree.column("Profit", width=120, anchor="e")
 
-        total_revenue = self.controller.db.calculate_monthly_revenue(report_month)
-        total_expenses = self.controller.db.calculate_monthly_expenses(report_month)
-        profit = total_revenue - total_expenses
+        product_id = self.product_data[selected_product_name]['id']
+        total_revenue, total_expenses, profit = self.controller.db.calculate_product_profit(product_id)
 
-        if self.controller.db.save_or_update_report(report_month, total_revenue, total_expenses, profit):
-            messagebox.showinfo("Success", f"Report for {report_month} generated/updated successfully.")
-            self.refresh_data()
+        formatted_report = (
+            selected_product_name,
+            f"{total_revenue:.2f}",
+            f"{total_expenses:.2f}",
+            f"{profit:.2f}"
+        )
+        item_id = self.reports_tree.insert("", "end", values=formatted_report)
+        
+        if profit < 0:
+            self.reports_tree.tag_configure('negative_profit', foreground='red')
+            self.reports_tree.item(item_id, tags=('negative_profit',))
         else:
-            messagebox.showerror("Error", "Failed to generate/update report.")
+            self.reports_tree.tag_configure('positive_profit', foreground='green')
+            self.reports_tree.item(item_id, tags=('positive_profit',))
+        
+        self.current_report_data = [("Product", "Total Revenue ($)", "Total Expenses ($)", "Profit ($)"), formatted_report]
+        self.current_report_type = "Product Report"
+        self.export_btn.config(state=tk.NORMAL)
+        messagebox.showinfo("Success", f"Product report for {selected_product_name} generated successfully.")
 
-    def delete_report(self):
-        selected_item = self.reports_tree.focus()
-        if not selected_item:
-            messagebox.showwarning("Selection Error", "Please select a report to delete.")
+    def generate_monthly_report(self):
+        selected_month = self.month_combobox.get()
+        if not selected_month:
+            messagebox.showerror("Input Error", "Please select a month to generate the report.")
             return
 
-        report_id = self.reports_tree.item(selected_item)['values'][0]
-        report_month = self.reports_tree.item(selected_item)['values'][1]
+        self.clear_tree()
+        self.reports_tree.configure(columns=("Product", "Quantity Sold"), show="headings")
+        self.reports_tree.heading("Product", text="Product Name")
+        self.reports_tree.heading("Quantity Sold", text="Quantity Sold")
+        self.reports_tree.column("Product", width=250)
+        self.reports_tree.column("Quantity Sold", width=250, anchor="e")
+        
+        monthly_sales = self.controller.db.get_monthly_sales_by_product(selected_month)
+        
+        header = ("Product Name", "Quantity Sold")
+        self.current_report_data = [header]
+        
+        for name, quantity in monthly_sales:
+            formatted_data = (name, f"{quantity:.2f}")
+            self.reports_tree.insert("", "end", values=formatted_data)
+            self.current_report_data.append(formatted_data)
 
-        if messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete the report for '{report_month}'? This will NOT affect sales/purchases data."):
-            if self.controller.db.delete_stored_report(report_id):
-                messagebox.showinfo("Success", f"Report for '{report_month}' deleted successfully.")
-                self.refresh_data()
+        if not monthly_sales:
+            self.reports_tree.insert("", "end", values=("No sales found for this month.", ""))
+            self.export_btn.config(state=tk.DISABLED)
+        else:
+            self.current_report_type = "Monthly Sales Report"
+            self.export_btn.config(state=tk.NORMAL)
+        messagebox.showinfo("Success", f"Monthly sales report for {selected_month} generated successfully.")
+
+    def save_to_excel(self):
+        if not self.current_report_data:
+            messagebox.showerror("Export Error", "No report data to export.")
+            return
+
+        file_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel files", "*.xlsx")],
+            title=f"Save {self.current_report_type}"
+        )
+
+        if file_path:
+            try:
+                headers = self.current_report_data[0]
+                data = self.current_report_data[1:]
+                df = pd.DataFrame(data, columns=headers)
+                df.to_excel(file_path, index=False)
+                messagebox.showinfo("Success", f"Report successfully saved to {os.path.basename(file_path)}")
+            except Exception as e:
+                messagebox.showerror("Export Error", f"Failed to save to Excel: {e}")
 
     def refresh_data(self):
+        self.clear_tree()
+        products = self.controller.db.get_products()
+        product_names = []
+        self.product_data = {}
+        for prod_id, name, _, _, _, _, _ in products:
+            product_names.append(name)
+            self.product_data[name] = {"id": prod_id}
+        self.product_combobox.set_completion_list(product_names)
+        self.product_combobox.set("")
+        
+        available_months = self.controller.db.get_available_report_months()
+        self.month_combobox['values'] = available_months
+        self.month_combobox.set("")
+        
+        self.export_btn.config(state=tk.DISABLED)
+
+    def clear_tree(self):
         for item in self.reports_tree.get_children():
             self.reports_tree.delete(item)
-
-        reports = self.controller.db.get_stored_reports()
-        for report in reports:
-            formatted_report = (
-                report[0],
-                report[1],
-                f"{report[2]:.2f}",
-                f"{report[3]:.2f}",
-                f"{report[4]:.2f}"
-            )
-            item_id = self.reports_tree.insert("", "end", values=formatted_report)
-            profit_value = report[4]
-            if profit_value < 0:
-                self.reports_tree.tag_configure('negative_profit', foreground='red')
-                self.reports_tree.item(item_id, tags=('negative_profit',))
-            else:
-                self.reports_tree.tag_configure('positive_profit', foreground='green')
-                self.reports_tree.item(item_id, tags=('positive_profit',))
-
-
-    def show_context_menu(self, event):
-        item_id = self.reports_tree.identify_row(event.y)
-        if item_id:
-            self.reports_tree.selection_set(item_id)
-            self.reports_tree.focus(item_id)
-            self.context_menu.post(event.x_root, event.y_root)
 
 if __name__ == "__main__":
     app = InventoryApp()
