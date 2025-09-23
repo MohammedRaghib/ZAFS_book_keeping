@@ -58,65 +58,12 @@ class Database:
         self.conn.commit()
 
     def _check_and_migrate_schema(self):
-        tables_to_check = {
-            "products": {"column": "stock_quantity", "current_schema_sql": """
-                CREATE TABLE products_new (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name TEXT NOT NULL UNIQUE,
-                    category TEXT,
-                    purchase_price REAL NOT NULL,
-                    selling_price REAL NOT NULL,
-                    stock_quantity REAL NOT NULL,
-                    expiry_date TEXT
-                )
-            """},
-            "sales": {"column": "quantity", "current_schema_sql": """
-                CREATE TABLE sales_new (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    product_id INTEGER NOT NULL,
-                    quantity REAL NOT NULL,
-                    sale_date TEXT NOT NULL,
-                    total_price REAL NOT NULL,
-                    FOREIGN KEY (product_id) REFERENCES products(id)
-                )
-            """},
-            "purchases": {"column": "quantity", "current_schema_sql": """
-                CREATE TABLE purchases_new (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    product_id INTEGER NOT NULL,
-                    quantity REAL NOT NULL,
-                    purchase_date TEXT NOT NULL,
-                    cost_price REAL NOT NULL,
-                    supplier_name TEXT,
-                    FOREIGN KEY (product_id) REFERENCES products(id)
-                )
-            """}
-        }
-
-        for table_name, details in tables_to_check.items():
-            column_name = details["column"]
-            try:
-                self.cursor.execute(f"PRAGMA table_info({table_name});")
-                columns_info = self.cursor.fetchall()
-                current_type = None
-                for col in columns_info:
-                    if col[1] == column_name:
-                        current_type = col[2].upper()
-                        break
-
-                if current_type == "INTEGER":
-                    messagebox.showinfo("Database Migration",
-                                         f"Migrating '{column_name}' in '{table_name}' table from INTEGER to REAL. "
-                                         "This may take a moment.")
-                    self._perform_migration(table_name, details["current_schema_sql"])
-                    messagebox.showinfo("Database Migration",
-                                         f"Migration for '{column_name}' in '{table_name}' complete.")
-            except sqlite3.OperationalError as e:
-                if "no such table" not in str(e):
-                    messagebox.showerror("Database Error", f"Error checking schema for {table_name}: {e}")
-            except Exception as e:
-                messagebox.showerror("Migration Error", f"Failed to migrate schema for {table_name}: {e}")
-
+        self.cursor.execute("PRAGMA table_info(products)")
+        columns = [column[1] for column in self.cursor.fetchall()]
+        if 'go_down_quantity' not in columns:
+            self.cursor.execute("ALTER TABLE products ADD COLUMN go_down_quantity REAL NOT NULL DEFAULT 0")
+            self.conn.commit()
+        
     def _perform_migration(self, table_name, new_table_schema_sql):
         old_table_name = f"{table_name}_old"
         self.conn.execute("BEGIN TRANSACTION;")
@@ -142,10 +89,10 @@ class Database:
             self.conn.rollback()
             raise Exception(f"Migration failed for table {table_name}: {e}")
 
-    def add_product(self, name, category, purchase_price, selling_price, stock_quantity, expiry_date):
+    def add_product(self, name, category, purchase_price, selling_price, stock_quantity, go_down_quantity, expiry_date):
         try:
-            self.cursor.execute("INSERT INTO products (name, category, purchase_price, selling_price, stock_quantity, expiry_date) VALUES (?, ?, ?, ?, ?, ?)",
-                                 (name, category, purchase_price, selling_price, stock_quantity, expiry_date))
+            self.cursor.execute("INSERT INTO products (name, category, purchase_price, selling_price, stock_quantity, go_down_quantity, expiry_date) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                                 (name, category, purchase_price, selling_price, stock_quantity, go_down_quantity, expiry_date))
             self.conn.commit()
             return True
         except sqlite3.IntegrityError:
@@ -156,21 +103,21 @@ class Database:
             return False
 
     def get_products(self):
-        self.cursor.execute("SELECT id, name, category, purchase_price, selling_price, stock_quantity, expiry_date FROM products ORDER BY name ASC")
+        self.cursor.execute("SELECT id, name, category, purchase_price, selling_price, stock_quantity, go_down_quantity, expiry_date FROM products ORDER BY name ASC")
         return self.cursor.fetchall()
 
     def get_product_by_id(self, product_id):
-        self.cursor.execute("SELECT id, name, category, purchase_price, selling_price, stock_quantity, expiry_date FROM products WHERE id = ?", (product_id,))
+        self.cursor.execute("SELECT id, name, category, purchase_price, selling_price, stock_quantity, go_down_quantity, expiry_date FROM products WHERE id = ?", (product_id,))
         return self.cursor.fetchone()
 
     def get_product_by_name(self, name):
         self.cursor.execute("SELECT id, name, category, purchase_price, selling_price, stock_quantity, expiry_date FROM products WHERE name = ?", (name,))
         return self.cursor.fetchone()
 
-    def update_product(self, product_id, name, category, purchase_price, selling_price, stock_quantity, expiry_date):
+    def update_product(self, product_id, name, category, purchase_price, selling_price, stock_quantity, go_down_quantity, expiry_date):
         try:
-            self.cursor.execute("UPDATE products SET name=?, category=?, purchase_price=?, selling_price=?, stock_quantity=?, expiry_date=? WHERE id=?",
-                                 (name, category, purchase_price, selling_price, stock_quantity, expiry_date, product_id))
+            self.cursor.execute("UPDATE products SET name=?, category=?, purchase_price=?, selling_price=?, stock_quantity=?, go_down_quantity=?, expiry_date=? WHERE id=?",
+                                 (name, category, purchase_price, selling_price, stock_quantity, go_down_quantity, expiry_date, product_id))
             self.conn.commit()
             return True
         except sqlite3.IntegrityError:
@@ -187,11 +134,32 @@ class Database:
             return True
         except Exception as e:
             messagebox.showerror("Error", f"Failed to delete product: {e}")
-            return False
+            return 
+            
+    def transfer_stock(self, product_id, amount):
+        self.cursor.execute("SELECT stock_quantity, go_down_quantity FROM products WHERE id = ?", (product_id,))
 
-    def update_product_stock(self, product_id, quantity_change):
+        row = self.cursor.fetchone()
+
+        if not row:
+            return False
+        
+        stock, go_down = row
+
+        if go_down < amount:
+            return False
+        
+        new_stock = stock + amount
+        new_go_down = go_down - amount
+
+        self.cursor.execute("UPDATE products SET stock_quantity = ?, go_down_quantity = ? WHERE id = ?", (new_stock, new_go_down, product_id))
+        self.conn.commit()
+
+        return True
+
+    def update_product_stock(self, product_id, quantity_change, go_down):
         try:
-            self.cursor.execute("UPDATE products SET stock_quantity = stock_quantity + ? WHERE id = ?",
+            self.cursor.execute(f"UPDATE products SET {"go_down_quantity" if go_down else "stock_quantity"} = {"go_down_quantity" if go_down else "stock_quantity"} + ? WHERE id = ?",
                                  (quantity_change, product_id))
             self.conn.commit()
             return True
@@ -204,7 +172,7 @@ class Database:
             self.cursor.execute("INSERT INTO sales (product_id, quantity, total_price, sale_date) VALUES (?, ?, ?, ?)",
                                  (product_id, quantity, total_price, sale_date))
             self.conn.commit()
-            self.update_product_stock(product_id, -quantity)
+            self.update_product_stock(product_id, -quantity, go_down=False)
             return True
         except Exception as e:
             messagebox.showerror("Error", f"Failed to record sale: {e}")
@@ -232,7 +200,7 @@ class Database:
             self.conn.commit()
 
             if stock_adjustment != 0:
-                self.update_product_stock(product_id, -stock_adjustment)
+                self.update_product_stock(product_id, -stock_adjustment, go_down=False)
             return True
         except Exception as e:
             messagebox.showerror("Error", f"Failed to update sale: {e}")
@@ -247,7 +215,7 @@ class Database:
                 product_id, quantity = deleted_sale_data
                 self.cursor.execute("DELETE FROM sales WHERE id = ?", (sale_id,))
                 self.conn.commit()
-                self.update_product_stock(product_id, quantity)
+                self.update_product_stock(product_id, quantity, go_down=False)
                 return True
             return False
         except Exception as e:
@@ -259,7 +227,7 @@ class Database:
             self.cursor.execute("INSERT INTO purchases (product_id, quantity, cost_price, purchase_date, supplier_name) VALUES (?, ?, ?, ?, ?)",
                                  (product_id, quantity, cost_price, purchase_date, supplier_name))
             self.conn.commit()
-            self.update_product_stock(product_id, quantity)
+            self.update_product_stock(product_id, quantity, go_down=True)
             return True
         except Exception as e:
             messagebox.showerror("Error", f"Failed to record purchase: {e}")
@@ -285,9 +253,9 @@ class Database:
             if stock_adjustment < 0:
                 current_product_data = self.get_product_by_id(product_id)
                 if current_product_data:
-                    current_stock = current_product_data[5]
+                    current_stock = current_product_data[6]
                     if current_stock < abs(stock_adjustment):
-                        messagebox.showerror("Stock Error", f"Cannot reduce purchase quantity. Not enough stock to deduct {abs(stock_adjustment):.2f} units. Current stock: {current_stock:.2f}")
+                        messagebox.showerror("Stock Error", f"Cannot reduce purchase quantity. Not enough stock to deduct {abs(stock_adjustment):.2f} units. Current go down stock: {current_stock:.2f}")
                         return False
                 else:
                     messagebox.showerror("Error", "Product not found for stock check.")
@@ -298,7 +266,7 @@ class Database:
             self.conn.commit()
 
             if stock_adjustment != 0:
-                self.update_product_stock(product_id, stock_adjustment)
+                self.update_product_stock(product_id, stock_adjustment, go_down=True)
             return True
         except Exception as e:
             messagebox.showerror("Error", f"Failed to update purchase: {e}")
@@ -313,9 +281,9 @@ class Database:
                 product_id, quantity = deleted_purchase_data
                 current_product_data = self.get_product_by_id(product_id)
                 if current_product_data:
-                    current_stock = current_product_data[5]
+                    current_stock = current_product_data[6]
                     if current_stock < quantity:
-                        messagebox.showerror("Stock Error", f"Cannot delete this purchase. Deleting would make stock negative. Current stock: {current_stock:.2f}, Purchase quantity: {quantity:.2f}")
+                        messagebox.showerror("Stock Error", f"Cannot delete this purchase. Deleting would make stock negative. Current go down stock: {current_stock:.2f}, Purchase quantity: {quantity:.2f}")
                         return False
                 else:
                     messagebox.showerror("Error", "Product not found for stock check.")
@@ -323,7 +291,7 @@ class Database:
 
                 self.cursor.execute("DELETE FROM purchases WHERE id = ?", (purchase_id,))
                 self.conn.commit()
-                self.update_product_stock(product_id, -quantity)
+                self.update_product_stock(product_id, -quantity, go_down=True)
                 return True
             return False
         except Exception as e:
@@ -451,7 +419,33 @@ class ProductsFrame(tk.Frame):
         self.edit_mode = False
         self.current_product_id = None
 
-        self.input_frame = tk.LabelFrame(self, text="Add New Product", padx=10, pady=10)
+        self.canvas = tk.Canvas(self)
+        self.scrollbar = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.scrollable_frame = ttk.Frame(self.canvas)
+
+        self.scrollable_frame.bind(
+            "<Configure>",
+            lambda e: self.canvas.configure(
+                scrollregion=self.canvas.bbox("all")
+            )
+        )
+
+        self.canvas.create_window((0, 0), window=self.scrollable_frame, anchor="nw")
+        self.canvas.configure(yscrollcommand=self.scrollbar.set)
+
+        self.canvas.pack(side="left", fill="both", expand=True)
+        self.scrollbar.pack(side="right", fill="y")
+
+        main_container = tk.Frame(self.scrollable_frame)
+        main_container.pack(fill=tk.BOTH, expand=True)
+
+        left_side_frame = tk.Frame(main_container)
+        left_side_frame.pack(side=tk.LEFT, fill=tk.Y, padx=10, pady=10)
+
+        products_display_frame = tk.LabelFrame(main_container, text="Product List", padx=10, pady=10)
+        products_display_frame.pack(side=tk.RIGHT, fill="both", expand=True, padx=10, pady=10)
+
+        self.input_frame = tk.LabelFrame(left_side_frame, text="Add New Product", padx=10, pady=10)
         self.input_frame.pack(pady=10, fill="x")
 
         tk.Label(self.input_frame, text="Name:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
@@ -474,23 +468,44 @@ class ProductsFrame(tk.Frame):
         self.stock_quantity_entry = tk.Entry(self.input_frame, width=40)
         self.stock_quantity_entry.grid(row=4, column=1, padx=5, pady=5)
 
-        tk.Label(self.input_frame, text="Expiry Date:").grid(row=5, column=0, padx=5, pady=5, sticky="w")
+        tk.Label(self.input_frame, text="Go Down Quantity:").grid(row=5, column=0, padx=5, pady=5, sticky="w")
+        self.go_down_quantity_entry = tk.Entry(self.input_frame, width=40)
+        self.go_down_quantity_entry.grid(row=5, column=1, padx=5, pady=5)
+
+        tk.Label(self.input_frame, text="Expiry Date:").grid(row=6, column=0, padx=5, pady=5, sticky="w")
         self.expiry_date_display = tk.StringVar()
         self.expiry_date_label = tk.Label(self.input_frame, textvariable=self.expiry_date_display, width=37, anchor="w", relief="sunken", bd=1)
-        self.expiry_date_label.grid(row=5, column=1, padx=5, pady=5, sticky="ew")
+        self.expiry_date_label.grid(row=6, column=1, padx=5, pady=5, sticky="ew")
 
         self.date_picker_button = ttk.Button(self.input_frame, text="Select Date", command=self.open_date_picker)
-        self.date_picker_button.grid(row=5, column=2, padx=5, pady=5)
+        self.date_picker_button.grid(row=6, column=2, padx=5, pady=5)
 
         self.action_button = ttk.Button(self.input_frame, text="Add Product", command=self.handle_product_action)
-        self.action_button.grid(row=6, column=0, columnspan=3, pady=10)
+        self.action_button.grid(row=7, column=0, columnspan=3, pady=10)
 
         self.cancel_button = ttk.Button(self.input_frame, text="Cancel Edit", command=self.reset_form)
-        self.cancel_button.grid(row=7, column=0, columnspan=3, pady=5)
+        self.cancel_button.grid(row=8, column=0, columnspan=3, pady=5)
         self.cancel_button.grid_remove()
 
-        products_display_frame = tk.LabelFrame(self, text="Product List", padx=10, pady=10)
-        products_display_frame.pack(pady=10, fill="both", expand=True)
+        self.transfer_frame = tk.LabelFrame(left_side_frame, text="Transfer Stock from Go-Down", padx=10, pady=10)
+        self.transfer_frame.pack(pady=10, fill="x")
+
+        tk.Label(self.transfer_frame, text="Product ID:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
+        self.product_id_entry = tk.Entry(self.transfer_frame, width=20)
+        self.product_id_entry.grid(row=0, column=1, padx=5, pady=5)
+
+        tk.Label(self.transfer_frame, text="Amount to Transfer:").grid(row=1, column=0, padx=5, pady=5, sticky="w")
+        self.amount_entry = tk.Entry(self.transfer_frame, width=20)
+        self.amount_entry.grid(row=1, column=1, padx=5, pady=5)
+
+        transfer_button_frame = tk.Frame(self.transfer_frame)
+        transfer_button_frame.grid(row=2, column=0, columnspan=2, pady=10)
+
+        self.transfer_button = ttk.Button(transfer_button_frame, text="Transfer Stock", command=self.transfer_stock_action)
+        self.transfer_button.pack(side="left", padx=5)
+
+        self.cancel_transfer_button = ttk.Button(transfer_button_frame, text="Cancel", command=self.cancel_transfer)
+        self.cancel_transfer_button.pack(side="left", padx=5)
 
         self.search_entry = tk.Entry(products_display_frame, width=50)
         self.search_entry.pack(pady=5, padx=5, fill="x")
@@ -500,15 +515,16 @@ class ProductsFrame(tk.Frame):
         self.search_entry.bind("<FocusOut>", self.restore_search_placeholder)
 
         tree_frame = tk.Frame(products_display_frame)
-        tree_frame.pack(fill="both", expand=True)
+        tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
 
-        self.products_tree = ttk.Treeview(tree_frame, columns=("ID", "Name", "Category", "Purchase Price", "Selling Price", "Stock", "Expiry Date"), show="headings")
+        self.products_tree = ttk.Treeview(tree_frame, columns=("ID", "Name", "Category", "Purchase Price", "Selling Price", "Stock", "Go Down Quantity", "Expiry Date"), show="headings")
         self.products_tree.heading("ID", text="ID")
         self.products_tree.heading("Name", text="Name")
         self.products_tree.heading("Category", text="Category")
         self.products_tree.heading("Purchase Price", text="Purchase Price")
         self.products_tree.heading("Selling Price", text="Selling Price")
         self.products_tree.heading("Stock", text="Stock")
+        self.products_tree.heading("Go Down Quantity", text="Go Down Quantity")
         self.products_tree.heading("Expiry Date", text="Expiry Date")
 
         self.products_tree.column("ID", width=30, anchor="center")
@@ -517,6 +533,7 @@ class ProductsFrame(tk.Frame):
         self.products_tree.column("Purchase Price", width=90, anchor="e")
         self.products_tree.column("Selling Price", width=90, anchor="e")
         self.products_tree.column("Stock", width=60, anchor="e")
+        self.products_tree.column("Go Down Quantity", width=60, anchor="e")
         self.products_tree.column("Expiry Date", width=100, anchor="center")
 
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.products_tree.yview)
@@ -528,6 +545,7 @@ class ProductsFrame(tk.Frame):
         self.context_menu = tk.Menu(self, tearoff=0)
         self.context_menu.add_command(label="Edit Product", command=self.load_product_for_edit)
         self.context_menu.add_command(label="Delete Product", command=self.delete_product)
+        self.context_menu.add_command(label="Transfer Stock", command=self.set_transfer_fields)
         self.products_tree.bind("<Button-3>", self.show_context_menu)
 
         self.refresh_data()
@@ -551,14 +569,26 @@ class ProductsFrame(tk.Frame):
                 pass
 
         cal = Calendar(top, selectmode='day',
-                       year=initial_date.year,
-                       month=initial_date.month,
-                       day=initial_date.day)
+                        year=initial_date.year,
+                        month=initial_date.month,
+                        day=initial_date.day)
         cal.pack(pady=20)
 
         confirm_button = ttk.Button(top, text="Select", command=grab_date)
         confirm_button.pack(pady=10)
 
+    def set_transfer_fields(self):
+        selected_item = self.products_tree.focus()
+        if not selected_item:
+            messagebox.showwarning("Selection Error", "Please select a product to transfer stock.")
+            return
+
+        product_id = self.products_tree.item(selected_item)['values'][0]
+        self.product_id_entry.delete(0, tk.END)
+        self.product_id_entry.insert(0, str(product_id))
+        self.amount_entry.delete(0, tk.END)
+        self.amount_entry.focus()
+    
     def handle_product_action(self):
         if self.edit_mode:
             self.update_product()
@@ -571,17 +601,20 @@ class ProductsFrame(tk.Frame):
         purchase_price_str = self.purchase_price_entry.get().strip()
         selling_price_str = self.selling_price_entry.get().strip()
         stock_quantity_str = self.stock_quantity_entry.get().strip()
+        go_down_quantity_str = self.go_down_quantity_entry.get().strip()
         expiry_date = self.expiry_date_display.get().strip()
 
-        if not name or not category or not purchase_price_str or not selling_price_str or not stock_quantity_str:
-            messagebox.showerror("Input Error", "Name, Category, Purchase Price, Selling Price, and Stock Quantity are required.")
+        if not name or not category or not purchase_price_str or not selling_price_str or not stock_quantity_str or not go_down_quantity_str:
+            messagebox.showerror("Input Error", "Name, Category, Purchase Price, Selling Price, Go Down Quantity and Stock Quantity are required.")
             return
 
         try:
             purchase_price = float(purchase_price_str)
             selling_price = float(selling_price_str)
             stock_quantity = float(stock_quantity_str)
-            if purchase_price < 0 or selling_price < 0 or stock_quantity < 0:
+            go_down_quantity = float(go_down_quantity_str)
+
+            if purchase_price < 0 or selling_price < 0 or stock_quantity < 0 or go_down_quantity < 0:
                 messagebox.showerror("Input Error", "Prices and stock must be non-negative.")
                 return
         except ValueError:
@@ -591,7 +624,7 @@ class ProductsFrame(tk.Frame):
         if expiry_date == "":
             expiry_date = None
 
-        if self.controller.db.add_product(name, category, purchase_price, selling_price, stock_quantity, expiry_date):
+        if self.controller.db.add_product(name, category, purchase_price, selling_price, stock_quantity, go_down_quantity, expiry_date):
             messagebox.showinfo("Success", f"Product '{name}' added successfully.")
             self.reset_form()
             self.refresh_data()
@@ -607,7 +640,6 @@ class ProductsFrame(tk.Frame):
 
         product_id = self.products_tree.item(selected_item)['values'][0]
         product_data = self.controller.db.get_product_by_id(product_id)
-
         if product_data:
             self.edit_mode = True
             self.current_product_id = product_data[0]
@@ -621,7 +653,9 @@ class ProductsFrame(tk.Frame):
             self.selling_price_entry.insert(0, product_data[4])
             self.stock_quantity_entry.delete(0, tk.END)
             self.stock_quantity_entry.insert(0, product_data[5])
-            self.expiry_date_display.set(product_data[6] if product_data[6] else "")
+            self.go_down_quantity_entry.delete(0, tk.END)
+            self.go_down_quantity_entry.insert(0, product_data[6])
+            self.expiry_date_display.set(product_data[7] if product_data[7] else "")
 
             self.action_button.config(text="Update Product")
             self.cancel_button.grid()
@@ -637,6 +671,7 @@ class ProductsFrame(tk.Frame):
         purchase_price_str = self.purchase_price_entry.get().strip()
         selling_price_str = self.selling_price_entry.get().strip()
         stock_quantity_str = self.stock_quantity_entry.get().strip()
+        go_down_quantity_str = self.go_down_quantity_entry.get().strip()
         expiry_date = self.expiry_date_display.get().strip()
 
         if not name or not category or not purchase_price_str or not selling_price_str or not stock_quantity_str:
@@ -647,7 +682,9 @@ class ProductsFrame(tk.Frame):
             purchase_price = float(purchase_price_str)
             selling_price = float(selling_price_str)
             stock_quantity = float(stock_quantity_str)
-            if purchase_price < 0 or selling_price < 0 or stock_quantity < 0:
+            go_down_quantity = float(go_down_quantity_str)
+
+            if purchase_price < 0 or selling_price < 0 or stock_quantity < 0 or go_down_quantity < 0:
                 messagebox.showerror("Input Error", "Prices and stock must be non-negative.")
                 return
         except ValueError:
@@ -657,7 +694,7 @@ class ProductsFrame(tk.Frame):
         if expiry_date == "":
             expiry_date = None
 
-        if self.controller.db.update_product(self.current_product_id, name, category, purchase_price, selling_price, stock_quantity, expiry_date):
+        if self.controller.db.update_product(self.current_product_id, name, category, purchase_price, selling_price, stock_quantity, go_down_quantity, expiry_date):
             messagebox.showinfo("Success", f"Product '{name}' updated successfully.")
             self.reset_form()
             self.refresh_data()
@@ -697,16 +734,27 @@ class ProductsFrame(tk.Frame):
         self.purchase_price_entry.delete(0, tk.END)
         self.selling_price_entry.delete(0, tk.END)
         self.stock_quantity_entry.delete(0, tk.END)
+        self.go_down_quantity_entry.delete(0, tk.END)
         self.expiry_date_display.set("")
+
+    def cancel_transfer(self):
+        self.product_id_entry.delete(0, tk.END)
+        self.amount_entry.delete(0, tk.END)
 
     def refresh_data(self):
         for item in self.products_tree.get_children():
             self.products_tree.delete(item)
+
         products = self.controller.db.get_products()
+
         for product in products:
             formatted_product = list(product)
-            formatted_product[5] = f"{product[5]:.2f}"
+
+            formatted_product[5] = f"{product[5]:.2f}" if product[5] is not None else "0.00"
+            formatted_product[6] = f"{product[6]:.2f}" if product[6] is not None else "0.00"
+
             self.products_tree.insert("", "end", values=formatted_product)
+
         self.filter_products()
 
     def filter_products(self, event=None):
@@ -747,10 +795,25 @@ class ProductsFrame(tk.Frame):
             self.products_tree.focus(item_id)
             self.context_menu.post(event.x_root, event.y_root)
 
+    def transfer_stock_action(self):
+        try:
+            product_id = int(self.product_id_entry.get())
+            amount = float(self.amount_entry.get())
+            success = self.controller.db.transfer_stock(product_id, amount)
+
+            if success:
+                messagebox.showinfo("Success", f"Transferred {amount} items from go-down to stock for Product ID {product_id}.")
+                self.refresh_data()
+                self.controller.frames["reports"].refresh_data()
+            else:
+                messagebox.showerror("Error", "Not enough items in go-down or invalid product ID.")
+        except ValueError:
+            messagebox.showerror("Input Error", "Please enter valid numeric values.")
+
 class SalesFrame(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
-        self.controller = controller
+        self.controller : InventoryApp = controller
         self.edit_mode = False
         self.current_sale_id = None
         self.previous_sale_quantity = 0.0
@@ -867,7 +930,7 @@ class SalesFrame(tk.Frame):
         products = self.controller.db.get_products()
         product_names = []
         self.product_data = {}
-        for prod_id, name, category, purchase_price, selling_price, stock, expiry_date in products:
+        for prod_id, name, category, purchase_price, selling_price, stock, go_down_quantity, expiry_date in products:
             product_names.append(name)
             self.product_data[name] = {"id": prod_id, "price": selling_price, "stock": stock}
         self.product_combobox.set_completion_list(product_names)
@@ -907,7 +970,6 @@ class SalesFrame(tk.Frame):
         try:
             quantity = float(self.quantity_entry.get())
             
-            # Use the correct price for the calculation
             price_per_unit = self.original_price_per_unit
             if not self.edit_mode:
                 selected_product_name = self.product_combobox.get()
@@ -1122,7 +1184,7 @@ class SalesFrame(tk.Frame):
 class PurchasesFrame(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
-        self.controller = controller
+        self.controller : InventoryApp = controller
         self.edit_mode = False
         self.current_purchase_id = None
         self.previous_purchase_quantity = 0.0
@@ -1236,7 +1298,7 @@ class PurchasesFrame(tk.Frame):
         products = self.controller.db.get_products()
         product_names = []
         self.product_data = {}
-        for prod_id, name, category, purchase_price, selling_price, stock, expiry_date in products:
+        for prod_id, name, category, purchase_price, selling_price, stock, go_down_quantity, expiry_date in products:
             product_names.append(name)
             self.product_data[name] = {"id": prod_id, "purchase_price": purchase_price, "stock": stock}
         self.product_combobox.set_completion_list(product_names)
@@ -1452,7 +1514,7 @@ class PurchasesFrame(tk.Frame):
 class ReportsFrame(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
-        self.controller = controller
+        self.controller : InventoryApp = controller
         self.current_report_data = []
         self.current_report_type = None
 
@@ -1482,18 +1544,23 @@ class ReportsFrame(tk.Frame):
         reports_display_frame.pack(pady=10, fill="both", expand=True)
 
         tree_frame = tk.Frame(reports_display_frame)
-        tree_frame.pack(fill="both", expand=True)
+        tree_frame.pack(fill="both", expand=True, side="top")
+
+        self.export_btn = ttk.Button(
+            tree_frame,
+            text="Export to Excel",
+            command=self.save_to_excel,
+            state=tk.DISABLED
+        )
+        self.export_btn.pack(pady=10, side="bottom")
 
         self.reports_tree = ttk.Treeview(tree_frame)
-        
+
         vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.reports_tree.yview)
         vsb.pack(side='right', fill='y')
         self.reports_tree.configure(yscrollcommand=vsb.set)
-        
-        self.reports_tree.pack(side='left', fill="both", expand=True)
 
-        self.export_btn = ttk.Button(reports_display_frame, text="Export to Excel", command=self.save_to_excel, state=tk.DISABLED)
-        self.export_btn.pack(pady=10)
+        self.reports_tree.pack(side='left', fill="both", expand=True)
         
         self.product_data = {}
         self.refresh_data()
@@ -1595,7 +1662,7 @@ class ReportsFrame(tk.Frame):
         products = self.controller.db.get_products()
         product_names = []
         self.product_data = {}
-        for prod_id, name, _, _, _, _, _ in products:
+        for prod_id, name, _, _, _, _, _, _ in products:
             product_names.append(name)
             self.product_data[name] = {"id": prod_id}
         self.product_combobox.set_completion_list(product_names)
