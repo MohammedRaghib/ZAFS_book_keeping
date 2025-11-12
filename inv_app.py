@@ -2,8 +2,8 @@ from ttkwidgets.autocomplete import AutocompleteCombobox
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import sqlite3, os
-from datetime import datetime
-from tkcalendar import Calendar
+from datetime import datetime, date
+from tkcalendar import Calendar, DateEntry
 import pandas as pd
 
 class Database:
@@ -359,6 +359,20 @@ class Database:
         except Exception as e:
             messagebox.showerror("Report Error", f"Failed to delete report: {e}")
             return False
+        
+    def get_sales_report_by_date_range(self, start_date, end_date):
+        self.cursor.execute("""
+            SELECT 
+                p.name, 
+                SUM(s.total_price) AS total_revenue, 
+                SUM(s.quantity) AS total_quantity_sold
+            FROM sales s
+            JOIN products p ON s.product_id = p.id
+            WHERE s.sale_date BETWEEN ? AND ?
+            GROUP BY p.name
+            ORDER BY total_revenue DESC
+        """, (start_date, end_date))
+        return self.cursor.fetchall()
 
     def close(self):
         self.conn.close()
@@ -1514,165 +1528,146 @@ class PurchasesFrame(tk.Frame):
 class ReportsFrame(tk.Frame):
     def __init__(self, parent, controller):
         super().__init__(parent)
-        self.controller : InventoryApp = controller
+        self.controller: InventoryApp = controller
         self.current_report_data = []
-        self.current_report_type = None
+        self.current_report_type = "Date Range Sales Report"
+        
+        self.input_frame = tk.Frame(self, padx=10, pady=10)
+        self.input_frame.pack(pady=(10, 20), fill="x")
 
-        self.input_frame_product = tk.LabelFrame(self, text="Generate Product Report", padx=10, pady=10)
-        self.input_frame_product.pack(pady=10, fill="x")
-
-        tk.Label(self.input_frame_product, text="Select Product:").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.product_combobox = AutocompleteCombobox(self.input_frame_product, width=37, completevalues=[])
-        self.product_combobox.grid(row=0, column=1, padx=5, pady=5)
-
-        generate_btn_product = ttk.Button(self.input_frame_product, text="Generate Report", command=self.generate_product_report)
-        generate_btn_product.grid(row=1, column=0, columnspan=2, pady=10)
+        tk.Label(self.input_frame, text="Start Date:").grid(row=0, column=0, padx=5, pady=5, sticky="e")
+        self.start_date_entry = DateEntry(
+            self.input_frame, 
+            selectmode='day', 
+            date_pattern='yyyy-mm-dd', 
+            width=12,
+            background='#3b82f6', 
+            foreground='white', 
+            borderwidth=2
+        )
+        self.start_date_entry.grid(row=0, column=1, padx=(0, 15), pady=5, sticky="w")
+        
+        tk.Label(self.input_frame, text="End Date:").grid(row=0, column=2, padx=5, pady=5, sticky="e")
+        self.end_date_entry = DateEntry(
+            self.input_frame, 
+            selectmode='day', 
+            date_pattern='yyyy-mm-dd', 
+            width=12,
+            background='#3b82f6', 
+            foreground='white', 
+            borderwidth=2
+        )
+        self.end_date_entry.grid(row=0, column=3, padx=(0, 15), pady=5, sticky="w")
+        
+        generate_btn = ttk.Button(self.input_frame, text="Generate", command=self.generate_date_range_report)
+        generate_btn.grid(row=0, column=4, padx=20, pady=5, sticky="w")
         
         tk.Frame(self, height=2, bg="gray").pack(fill="x", pady=10)
 
-        self.input_frame_monthly = tk.LabelFrame(self, text="Generate Monthly Sales Report", padx=10, pady=10)
-        self.input_frame_monthly.pack(pady=10, fill="x")
-        
-        tk.Label(self.input_frame_monthly, text="Select Month (YYYY-MM):").grid(row=0, column=0, padx=5, pady=5, sticky="w")
-        self.month_combobox = ttk.Combobox(self.input_frame_monthly, width=37)
-        self.month_combobox.grid(row=0, column=1, padx=5, pady=5)
-        
-        generate_btn_monthly = ttk.Button(self.input_frame_monthly, text="Generate Report", command=self.generate_monthly_report)
-        generate_btn_monthly.grid(row=1, column=0, columnspan=2, pady=10)
-
         reports_display_frame = tk.LabelFrame(self, text="Report Details", padx=10, pady=10)
-        reports_display_frame.pack(pady=10, fill="both", expand=True)
+        reports_display_frame.pack(pady=(0, 10), fill="both", expand=True)
 
         tree_frame = tk.Frame(reports_display_frame)
         tree_frame.pack(fill="both", expand=True, side="top")
 
+        self.reports_tree = ttk.Treeview(tree_frame)
+        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.reports_tree.yview)
+        vsb.pack(side='right', fill='y')
+        self.reports_tree.configure(yscrollcommand=vsb.set)
+        self.reports_tree.pack(side='left', fill="both", expand=True)
+        
+        self.configure_tree_columns()
+        
         self.export_btn = ttk.Button(
-            tree_frame,
+            self,
             text="Export to Excel",
             command=self.save_to_excel,
             state=tk.DISABLED
         )
-        self.export_btn.pack(pady=10, side="bottom")
-
-        self.reports_tree = ttk.Treeview(tree_frame)
-
-        vsb = ttk.Scrollbar(tree_frame, orient="vertical", command=self.reports_tree.yview)
-        vsb.pack(side='right', fill='y')
-        self.reports_tree.configure(yscrollcommand=vsb.set)
-
-        self.reports_tree.pack(side='left', fill="both", expand=True)
+        self.export_btn.pack(pady=10)
         
-        self.product_data = {}
         self.refresh_data()
 
-    def generate_product_report(self):
-        selected_product_name = self.product_combobox.get()
-        if not selected_product_name:
-            messagebox.showerror("Input Error", "Please select a product to generate the report.")
+    def configure_tree_columns(self):
+        self.reports_tree['columns'] = ("Product name", "Total Sales", "Quantity Sold")
+        self.reports_tree.column("#0", width=0, stretch=tk.NO)
+        self.reports_tree.column("Product name", anchor=tk.W, width=180)
+        self.reports_tree.column("Total Sales", anchor=tk.E, width=120)
+        self.reports_tree.column("Quantity Sold", anchor=tk.E, width=100)
+        self.reports_tree.heading("Product name", text="Product name", anchor=tk.W)
+        self.reports_tree.heading("Total Sales", text="Total Sales", anchor=tk.E)
+        self.reports_tree.heading("Quantity Sold", text="Quantity Sold", anchor=tk.E)
+
+    def generate_date_range_report(self):
+        start_date_obj = self.start_date_entry.get_date()
+        end_date_obj = self.end_date_entry.get_date()
+        
+        start_date = start_date_obj.strftime("%Y-%m-%d")
+        end_date = end_date_obj.strftime("%Y-%m-%d")
+
+        if start_date > end_date:
+            messagebox.showerror("Input Error", "Start Date cannot be after End Date.")
             return
 
         self.clear_tree()
-        self.reports_tree.configure(columns=("Product", "Total Sales", "Total Expenses", "Profit"), show="headings")
-        self.reports_tree.heading("Product", text="Product Name")
-        self.reports_tree.heading("Total Sales", text="Total Revenue ($)")
-        self.reports_tree.heading("Total Expenses", text="Total Expenses ($)")
-        self.reports_tree.heading("Profit", text="Profit ($)")
-        self.reports_tree.column("Product", width=150)
-        self.reports_tree.column("Total Sales", width=120, anchor="e")
-        self.reports_tree.column("Total Expenses", width=120, anchor="e")
-        self.reports_tree.column("Profit", width=120, anchor="e")
+        self.configure_tree_columns()
 
-        product_id = self.product_data[selected_product_name]['id']
-        total_revenue, total_expenses, profit = self.controller.db.calculate_product_profit(product_id)
-
-        formatted_report = (
-            selected_product_name,
-            f"{total_revenue:.2f}",
-            f"{total_expenses:.2f}",
-            f"{profit:.2f}"
-        )
-        item_id = self.reports_tree.insert("", "end", values=formatted_report)
+        raw_report_data = self.controller.db.get_sales_report_by_date_range(start_date, end_date)
         
-        if profit < 0:
-            self.reports_tree.tag_configure('negative_profit', foreground='red')
-            self.reports_tree.item(item_id, tags=('negative_profit',))
-        else:
-            self.reports_tree.tag_configure('positive_profit', foreground='green')
-            self.reports_tree.item(item_id, tags=('positive_profit',))
-        
-        self.current_report_data = [("Product", "Total Revenue ($)", "Total Expenses ($)", "Profit ($)"), formatted_report]
-        self.current_report_type = "Product Report"
-        self.export_btn.config(state=tk.NORMAL)
-        messagebox.showinfo("Success", f"Product report for {selected_product_name} generated successfully.")
-
-    def generate_monthly_report(self):
-        selected_month = self.month_combobox.get()
-        if not selected_month:
-            messagebox.showerror("Input Error", "Please select a month to generate the report.")
-            return
-
-        self.clear_tree()
-        self.reports_tree.configure(columns=("Product", "Quantity Sold"), show="headings")
-        self.reports_tree.heading("Product", text="Product Name")
-        self.reports_tree.heading("Quantity Sold", text="Quantity Sold")
-        self.reports_tree.column("Product", width=250)
-        self.reports_tree.column("Quantity Sold", width=250, anchor="e")
-        
-        monthly_sales = self.controller.db.get_monthly_sales_by_product(selected_month)
-        
-        header = ("Product Name", "Quantity Sold")
+        header = ("Product name", "Total Sales", "Quantity Sold")
         self.current_report_data = [header]
         
-        for name, quantity in monthly_sales:
-            formatted_data = (name, f"{quantity:.2f}")
-            self.reports_tree.insert("", "end", values=formatted_data)
-            self.current_report_data.append(formatted_data)
-
-        if not monthly_sales:
-            self.reports_tree.insert("", "end", values=("No sales found for this month.", ""))
+        if not raw_report_data:
+            self.reports_tree.insert("", "end", values=("No sales data found for this date range.", "", ""))
             self.export_btn.config(state=tk.DISABLED)
-        else:
-            self.current_report_type = "Monthly Sales Report"
-            self.export_btn.config(state=tk.NORMAL)
-        messagebox.showinfo("Success", f"Monthly sales report for {selected_month} generated successfully.")
-
-    def save_to_excel(self):
-        if not self.current_report_data:
-            messagebox.showerror("Export Error", "No report data to export.")
+            messagebox.showinfo("Report Empty", "No sales were recorded in the selected date range.")
             return
 
-        file_path = filedialog.asksaveasfilename(
+        for name, revenue, quantity in raw_report_data:
+            formatted_revenue = f"{revenue:,.2f}"
+            formatted_quantity = f"{quantity:,.0f}" if quantity == int(quantity) else f"{quantity:,.2f}"
+            
+            formatted_row = (name, formatted_revenue, formatted_quantity)
+            item_id = self.reports_tree.insert("", "end", values=formatted_row)
+            self.current_report_data.append((name, revenue, quantity))
+
+            if revenue < 0:
+                self.reports_tree.tag_configure('negative', foreground='red')
+                self.reports_tree.item(item_id, tags=('negative',))
+            else:
+                self.reports_tree.tag_configure('positive', foreground='green')
+                self.reports_tree.item(item_id, tags=('positive',))
+        
+        self.export_btn.config(state=tk.NORMAL)
+        messagebox.showinfo("Success", f"Sales report from {start_date} to {end_date} generated successfully.")
+
+    def save_to_excel(self):
+        if not self.current_report_data or len(self.current_report_data) <= 1:
+            messagebox.showwarning("Export Warning", "No data to export.")
+            return
+
+        filepath = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
-            filetypes=[("Excel files", "*.xlsx")],
-            title=f"Save {self.current_report_type}"
+            filetypes=[("Excel files", "*.xlsx"), ("All files", "*.*")],
+            title=f"Save {self.current_report_type} Export"
         )
 
-        if file_path:
-            try:
-                headers = self.current_report_data[0]
-                data = self.current_report_data[1:]
-                df = pd.DataFrame(data, columns=headers)
-                df.to_excel(file_path, index=False)
-                messagebox.showinfo("Success", f"Report successfully saved to {os.path.basename(file_path)}")
-            except Exception as e:
-                messagebox.showerror("Export Error", f"Failed to save to Excel: {e}")
+        if not filepath:
+            return
+
+        try:
+            df = pd.DataFrame(self.current_report_data[1:], columns=self.current_report_data[0])
+            df.to_excel(filepath, index=False)
+            messagebox.showinfo("Export Successful", f"Report successfully exported to:\n{os.path.basename(filepath)}")
+        except Exception as e:
+            messagebox.showerror("Export Error", f"An error occurred during export: {e}")
 
     def refresh_data(self):
         self.clear_tree()
-        products = self.controller.db.get_products()
-        product_names = []
-        self.product_data = {}
-        for prod_id, name, _, _, _, _, _, _ in products:
-            product_names.append(name)
-            self.product_data[name] = {"id": prod_id}
-        self.product_combobox.set_completion_list(product_names)
-        self.product_combobox.set("")
-        
-        available_months = self.controller.db.get_available_report_months()
-        self.month_combobox['values'] = available_months
-        self.month_combobox.set("")
-        
         self.export_btn.config(state=tk.DISABLED)
+        today = date.today()
+        self.end_date_entry.set_date(today)
+        self.start_date_entry.set_date(today)
 
     def clear_tree(self):
         for item in self.reports_tree.get_children():
