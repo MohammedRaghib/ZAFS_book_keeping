@@ -74,9 +74,9 @@ The application is divided into four main sections, accessible via navigation bu
 1. **Save the Code:**  
    Save the provided Python code as `inventory_app.py` (or any `.py` filename).
 
-2. **Install tkcalendar:**  
+2. **Install requirements:**  
    ```bash
-   pip install tkcalendar
+   pip install -r requirements.txt
    ```
 
 3. **Run the Application:**  
