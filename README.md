@@ -9,6 +9,7 @@ A simple bookkeeping web application to manage products, sales, purchases, and p
 - [Overview](#overview)
 - [Features](#features)
 - [Installation](#installation)
+- [Docker Setup](#docker-setup)
 - [Usage](#usage)
 - [Project Structure](#project-structure)
 - [Contributing](#contributing)
@@ -50,6 +51,43 @@ A simple bookkeeping web application to manage products, sales, purchases, and p
 
 ---
 
+## Docker Setup
+
+The project includes a `Dockerfile` and `docker-compose.yml` for containerized development. This runs the PHP app in Apache and a MySQL 8.0 database.
+
+1. **Prerequisites:**
+   - Ensure [Docker](https://www.docker.com/get-started) and [Docker Compose](https://docs.docker.com/compose/) are installed.
+
+2. **Configure environment variables (optional):**
+   - Docker Compose reads the `.env` file automatically and all values have sensible defaults, so no setup is needed to get started.
+   - To customize the ports or database credentials, edit `.env` (e.g., `APP_PORT`, `MYSQL_ROOT_PASSWORD`). This file is git-ignored — never commit it.
+
+3. **Start the containers:**
+   ```bash
+   docker-compose up -d
+   ```
+   This builds and starts two containers:
+   - `zafs` – the PHP/Apache application, exposed on `http://localhost:8080`
+   - `zafs-db` – the MySQL 8.0 database on port `3306`
+
+4. **Access the application:**
+   - Open `http://localhost:8080` in your browser. The app redirects to `Products.php`.
+
+5. **Create the schema (first time only):**
+   - The tables are not auto-created. Run the `CREATE TABLE` statements from `db.php` inside the MySQL container:
+     ```bash
+     docker exec -it zafs-db mysql -u root -prootpass zafs
+     ```
+     Then paste the schema from `db.php` and exit with `exit`. Use the root password from `.env` (`MYSQL_ROOT_PASSWORD`) if you changed it.
+
+6. **Stop the containers:**
+   ```bash
+   docker-compose down
+   ```
+   Database data is persisted in the `db_data` volume and survives container restarts. To remove it along with the containers, use `docker-compose down -v`.
+
+---
+
 ## Usage
 
 - Navigate to the main page in your browser (e.g., `http://localhost/ZAFS_book_keeping/`).
@@ -65,8 +103,12 @@ A simple bookkeeping web application to manage products, sales, purchases, and p
 - `Sales.php` – Manage sales transactions.
 - `Purchases.php` – Manage purchase records.
 - `Reports.php` – Generate and view profit reports.
+- `index.php` – Redirects to `Products.php`.
 - `Nav.php` – Navigation bar.
 - `base.css` – Styling.
+- `db.php` – Database connection (uses `DB_HOST`, `DB_NAME`, `DB_USER`, `DB_PASS` env vars with defaults).
+- `Dockerfile` – Builds the PHP/Apache container.
+- `docker-compose.yml` – Orchestrates the app and MySQL services.
 
 ---
 

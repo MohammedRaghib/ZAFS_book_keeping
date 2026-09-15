@@ -1,8 +1,8 @@
 <?php
-$host = 'localhost';
-$dbname = 'zafs';
-$username = 'Admin';
-$password = '&(3w92^$&NeTgNyEFM';
+$host = getenv('DB_HOST') ?: 'localhost';
+$dbname = getenv('DB_NAME') ?: 'zafs';
+$username = getenv('DB_USER') ?: 'Admin';
+$password = getenv('DB_PASS') ?: '&(3w92^$&NeTgNyEFM';
 /*
     CREATE TABLE products (
         id INT AUTO_INCREMENT PRIMARY KEY,

@@ -1,0 +1,36 @@
+services:
+  app:
+    build: .
+    container_name: zafs
+    ports:
+      - "${APP_PORT:-8080}:80"
+    environment:
+      DB_HOST: ${DB_HOST:-zafs-db}
+      DB_NAME: ${DB_NAME:-zafs}
+      DB_USER: ${DB_USER:-zafs}
+      DB_PASS: ${DB_PASS:-zafspass}
+    depends_on:
+      - db
+    networks:
+      - zafs-network
+
+  db:
+    image: mysql:8.0
+    container_name: zafs-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-rootpass}
+      MYSQL_DATABASE: ${DB_NAME:-zafs}
+      MYSQL_USER: ${DB_USER:-zafs}
+      MYSQL_PASSWORD: ${DB_PASS:-zafspass}
+    ports:
+      - "${MYSQL_PORT:-3306}:3306"
+    volumes:
+      - db_data:/var/lib/mysql
+    networks:
+      - zafs-network
+
+volumes:
+  db_data:
+
+networks:
+  zafs-network:
